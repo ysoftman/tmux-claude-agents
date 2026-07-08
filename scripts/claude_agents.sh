@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # ysoftman
-# tmux status line 용 claude code 에이전트 목록 데몬 — claude-agents.tmux 가 시작한다.
-# claude 가 OSC title 로 내보내는 상태(점자 스피너=작업중)를 tmux 가 pane_title 에
-# 캡처해 두므로, pane 단위로 세션별 상태를 정확히 읽는다. 같은 디렉토리의 세션들은
-# 아이콘을 겹쳐 하나의 항목으로 묶는다(예: ⠹● myenv).
-# status-format[1] 을 직접 set 하고, 에이전트가 없으면 status 를 1줄로 줄여
-# 라인 자체를 숨긴다. tmux 서버가 종료되면 set 실패로 함께 종료된다.
+# Claude code agents status-line daemon for tmux — started by claude-agents.tmux.
+# claude reports its state via the OSC title (braille spinner = working), which
+# tmux captures in pane_title, so per-session state is read accurately per pane.
+# Sessions in the same directory are merged into one entry with stacked icons
+# (e.g. ⠹● myenv).
+# Sets status-format[1] directly and shrinks status back to one line when no
+# agent is running, hiding the line entirely. Exits when tmux server dies
+# (set fails).
 
-# 점자 스피너(U+2800-U+28FF) 판별을 로케일 무관하게 UTF-8 바이트 접두사로 매칭
+# match braille spinner (U+2800-U+28FF) by UTF-8 byte prefix, locale-independent
 export LC_ALL=C
 
-# 점자 회전 — 10프레임이라 부드럽고, 1칸 폭이라 yellow/bold 색이 그대로 먹는다
 frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-# 승인/선택 대기 프롬프트 문구 (herdr 의 claude 매니페스트에서 발췌)
 blocked_re='do you want to|would you like to|waiting for permission|esc to cancel'
 
-# 직전 디렉토리(prev)에 모인 아이콘들을 하나의 항목으로 cached 에 붙인다
+# append icons collected for the previous directory (prev) to cached as one entry
 flush() {
     local name
     [ -z "$prev" ] && return
@@ -35,9 +35,10 @@ scan() {
     prev=""
     icons=""
     while IFS=$'\t' read -r cmd path id title; do
-        # claude 는 프로세스 타이틀을 버전 문자열(예: 2.1.204)로 바꾼다 — 이걸로
-        # claude pane 을 식별해, 종료 후 남은 pane 제목이 유령 항목이 되는 걸 막는다
-        # ponytail: 타이틀 규칙이 바뀌면 pane_pid 하위 프로세스 comm 검사로 교체
+        # claude sets its process title to a version string (e.g. 2.1.204) — use
+        # this to identify claude panes, so stale pane titles after exit don't
+        # become ghost entries
+        # ponytail: if the title convention changes, switch to checking child process comm under pane_pid
         case "$cmd" in
             [0-9]*.[0-9]*) ;;
             *) continue ;;
@@ -48,11 +49,11 @@ scan() {
             icons=""
         fi
         case "$title" in
-            $'\xe2\xa0'* | $'\xe2\xa1'* | $'\xe2\xa2'* | $'\xe2\xa3'*) # 점자 = 작업중
+            $'\xe2\xa0'* | $'\xe2\xa1'* | $'\xe2\xa2'* | $'\xe2\xa3'*) # braille = working
                 icons+='#[fg=yellow,bold]@ICON@#[default]'
                 ;;
-            *) # 나머지 = 입력 대기. 화면 하단에 승인 프롬프트가 떠 있으면 blocked
-                # ponytail: 대화 출력에 같은 문구가 하단에 걸리면 오탐 가능 — 스크롤되면 자연 해소
+            *) # otherwise = waiting for input; blocked if a permission prompt is on screen
+                # ponytail: conversation output containing the same phrases near the bottom can false-positive — resolves itself once it scrolls
                 if tmux capture-pane -p -t "$id" 2>/dev/null | tail -20 | grep -qiE "$blocked_re"; then
                     icons+='#[fg=red,bold]!#[default]'
                 else
@@ -64,7 +65,7 @@ scan() {
     flush
 }
 
-# 줄 내용이 바뀔 때만 set (tmux 서버가 없으면 종료)
+# set only when the line content changes (exit if tmux server is gone)
 show_line() {
     [ "$1" = "$last_line" ] && return
     last_line="$1"
@@ -75,12 +76,12 @@ last_line=""
 visible=""
 tick=0
 while :; do
-    # 스캔은 약 3초에 한 번, 프레임 갱신은 매 반복
+    # scan about every 3 seconds, refresh the frame every iteration
     ((tick % 3 == 0)) && scan
     tick=$((tick + 1))
     if [ -z "$cached" ]; then
         if [ "$visible" != off ]; then
-            tmux set -g status on || exit 0 # 에이전트 없음 — 라인 숨김
+            tmux set -g status on || exit 0 # no agents — hide the line
             visible=off
         fi
         sleep 1
