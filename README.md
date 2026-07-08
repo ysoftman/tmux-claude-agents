@@ -8,12 +8,13 @@ Show running [Claude Code](https://claude.com/claude-code) agents — and whethe
 
 - `✢ ✳ ✶ ✻ ✽` (yellow, bold, animated spinner): working
 - `●` (green): idle — waiting for user input
+- `!` (red): blocked — waiting for your approval (permission prompt or selection)
 - `no claude agents`: no claude process running
 
 ## Requirements
 
 - tmux >= 3.0 (uses `status-format[1]`)
-- Claude Code terminal title updates (on by default) — status is read from each pane's OSC title
+- Claude Code terminal title updates (on by default) — used to tell working from idle; without them sessions still show as idle
 
 ## Installation
 
@@ -32,7 +33,8 @@ run-shell /path/to/tmux-claude-agents/claude-agents.tmux
 ## Notes
 
 - All tmux status lines stack at `status-position`, so the agent line renders next to the main status bar (top or bottom follows your setting).
-- Detection is per pane: Claude Code writes its state to the terminal title (braille spinner = working, `✳` = idle) and tmux captures it as `pane_title`. Multiple sessions in the same directory show as separate entries.
+- Detection is per pane: a pane counts as claude when its foreground process title is claude's version string, and it counts as working when the terminal title starts with a braille spinner. Non-working panes are marked blocked when a permission/selection prompt is visible at the bottom of the screen.
+- Multiple sessions in the same directory are merged into one entry with one icon per session, e.g. `✻● myenv` (one working, one idle).
 - Only claude sessions running inside tmux panes are shown.
 
 ## License

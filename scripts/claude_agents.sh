@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ysoftman
 # tmux status line 용 claude code 에이전트 목록 모듈.
-# claude 가 OSC title 로 내보내는 상태(점자 스피너=작업중, ✳=대기)를 tmux 가
-# pane_title 에 캡처해 두므로, pane 단위로 세션별 상태를 정확히 읽는다.
+# claude 가 OSC title 로 내보내는 상태(점자 스피너=작업중)를 tmux 가 pane_title 에
+# 캡처해 두므로, pane 단위로 세션별 상태를 정확히 읽는다. 같은 디렉토리의 세션들은
+# 아이콘을 겹쳐 하나의 항목으로 묶는다(예: ✻● myenv).
 # 상주 루프 — tmux #() 는 살아있는 명령의 최신 출력 줄을 쓰므로 status-interval 보다
 # 빠르게 스피너가 돈다.
 
@@ -11,23 +12,56 @@ export LC_ALL=C
 
 idle_text='#[fg=colour244]no claude agents#[default]'
 frames=('✢' '✳' '✶' '✻' '✽')
+# 승인/선택 대기 프롬프트 문구 (herdr 의 claude 매니페스트에서 발췌)
+blocked_re='do you want to|would you like to|waiting for permission|esc to cancel'
+
+# 직전 디렉토리(prev)에 모인 아이콘들을 하나의 항목으로 cached 에 붙인다
+flush() {
+    local name
+    [ -z "$prev" ] && return
+    name="${prev##*/}"
+    if [[ "$icons" == *fg=red* ]]; then
+        cached+="${icons} #[fg=red,bold]${name}#[default]   "
+    elif [[ "$icons" == *@ICON@* ]]; then
+        cached+="${icons} #[fg=yellow,bold]${name}#[default]   "
+    else
+        cached+="${icons} #[fg=green]${name}#[default]   "
+    fi
+}
 
 scan() {
-    local title path name
+    local cmd path id title
     cached=""
-    # ponytail: claude 종료 후 셸이 pane 제목을 덮지 않으면 유령 항목이 남을 수 있음
-    # — 문제되면 pane_pid 하위에 claude 프로세스가 있는지 교차검증 추가
-    while IFS=$'\t' read -r title path; do
-        name="${path##*/}"
+    prev=""
+    icons=""
+    while IFS=$'\t' read -r cmd path id title; do
+        # claude 는 프로세스 타이틀을 버전 문자열(예: 2.1.204)로 바꾼다 — 이걸로
+        # claude pane 을 식별해, 종료 후 남은 pane 제목이 유령 항목이 되는 걸 막는다
+        # ponytail: 타이틀 규칙이 바뀌면 pane_pid 하위 프로세스 comm 검사로 교체
+        case "$cmd" in
+            [0-9]*.[0-9]*) ;;
+            *) continue ;;
+        esac
+        if [ "$path" != "$prev" ]; then
+            flush
+            prev="$path"
+            icons=""
+        fi
         case "$title" in
-            $'\xe2\xa0'* | $'\xe2\xa1'* | $'\xe2\xa2'* | $'\xe2\xa3'*) # 점자 U+2800-28FF = 작업중
-                cached+="#[fg=yellow,bold]@ICON@ ${name}#[default]   "
+            $'\xe2\xa0'* | $'\xe2\xa1'* | $'\xe2\xa2'* | $'\xe2\xa3'*) # 점자 = 작업중
+                icons+='#[fg=yellow,bold]@ICON@#[default]'
                 ;;
-            $'\xe2\x9c\xb3 '*) # '✳ ' (U+2733) = 대기
-                cached+="#[fg=green]● ${name}#[default]   "
+            *) # 나머지 = 입력 대기. 화면 하단에 승인 프롬프트가 떠 있으면 blocked
+                # ponytail: 대화 출력에 같은 문구가 하단에 걸리면 오탐 가능 — 스크롤되면 자연 해소
+                if tmux capture-pane -p -t "$id" 2>/dev/null | tail -20 | grep -qiE "$blocked_re"; then
+                    icons+='#[fg=red,bold]!#[default]'
+                else
+                    icons+='#[fg=green]●#[default]'
+                fi
                 ;;
         esac
-    done < <(tmux list-panes -a -F $'#{pane_title}\t#{pane_current_path}')
+    done < <(tmux list-panes -a -F $'#{pane_current_command}\t#{pane_current_path}\t#{pane_id}\t#{pane_title}' | sort -t$'\t' -k2,2)
+    flush
     cached="${cached:-$idle_text}"
 }
 
