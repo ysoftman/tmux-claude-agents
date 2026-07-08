@@ -13,7 +13,7 @@ Show running [Claude Code](https://claude.com/claude-code) agents — and whethe
 ## Requirements
 
 - tmux >= 3.0 (uses `status-format[1]`)
-- macOS (needs `lsof`) or Linux (uses `/proc`)
+- Claude Code terminal title updates (on by default) — status is read from each pane's OSC title
 
 ## Installation
 
@@ -29,17 +29,11 @@ Or manually in `.tmux.conf`:
 run-shell /path/to/tmux-claude-agents/claude-agents.tmux
 ```
 
-## Options
-
-```tmux
-# seconds since the last transcript write to count as "working" (default: 30)
-set -g @claude_agents_busy_window 30
-```
-
 ## Notes
 
 - All tmux status lines stack at `status-position`, so the agent line renders next to the main status bar (top or bottom follows your setting).
-- Multiple sessions in the same directory get one status icon each, e.g. `✻● myenv` (one working, one idle). Icons are matched to the newest transcripts in that directory — exact process↔session pairing isn't knowable.
+- Detection is per pane: Claude Code writes its state to the terminal title (braille spinner = working, `✳` = idle) and tmux captures it as `pane_title`. Multiple sessions in the same directory show as separate entries.
+- Only claude sessions running inside tmux panes are shown.
 
 ## License
 
