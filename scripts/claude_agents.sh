@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ysoftman
 # Claude Code / OpenCode agents status-line daemon for tmux — started by claude-agents.tmux.
-# Claude Code reports its state via the OSC title (braille spinner = working),
+# Claude Code reports its state via the OSC title (spinner prefix = working),
 # which tmux captures in pane_title, so per-session state is read per pane.
 # OpenCode only puts the session name in the title, so its state is read from
 # the TUI footer line instead.
@@ -11,7 +11,12 @@
 # agent is running, hiding the line entirely. Exits when tmux server dies
 # (set fails).
 
-# match braille spinner (U+2800-U+28FF) by UTF-8 byte prefix, locale-independent
+# match spinner chars by UTF-8 byte prefix, locale-independent.
+# claude code used braille ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ (U+2800-U+28FF) up to ~2.1.2xx, then switched to
+# circle quadrants ◐◓◑◒ (U+25D0-U+25D3) as of 2.1.228 — match both.
+# the pulsing star ·✢✳✶✻✽ seen while working lives only in the TUI screen,
+# not the title; idle teammate panes carry a static ✳ title prefix, so a
+# star in the title must NOT be treated as working
 export LC_ALL=C
 
 # claude: same star sequence Claude Code animates with, ping-ponging back down
@@ -19,6 +24,9 @@ export LC_ALL=C
 frames=('·' '✢' '✳' '✶' '✻' '✽' '✻' '✶' '✳' '✢')
 bframes=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 blocked_re='do you want to|would you like to|waiting for permission|esc to cancel'
+# star status line claude draws at column 1 only while a turn is running,
+# e.g. "✳ Processing… (1m 28s · ↓ 2.8k tokens)" — gone when idle
+working_re='^(·|✢|✳|✶|✻|✽) .*…'
 
 # append icons collected for the previous directory (prev) to cached as one entry
 flush() {
@@ -32,6 +40,19 @@ flush() {
     else
         cached+="${icons} #[fg=green]${name}#[default]   "
     fi
+}
+
+# true if the title starts with a spinner char (braille or ◐◓◑◒).
+# a spinner prefix alone doesn't prove working: claude leaves the last frame
+# frozen in the title after it stops (seen on 2.1.228, e.g. after finishing
+# while in the agents view). the title also freezes while a tool runs, so
+# title animation can't be used either — the screen (working_re) decides
+is_spinner() {
+    case "$1" in
+        $'\xe2\xa0'* | $'\xe2\xa1'* | $'\xe2\xa2'* | $'\xe2\xa3'* | \
+            $'\xe2\x97\x90'* | $'\xe2\x97\x91'* | $'\xe2\x97\x92'* | $'\xe2\x97\x93'*) return 0 ;;
+    esac
+    return 1
 }
 
 scan() {
@@ -67,19 +88,18 @@ scan() {
             esac
             continue
         fi
-        case "$title" in
-            $'\xe2\xa0'* | $'\xe2\xa1'* | $'\xe2\xa2'* | $'\xe2\xa3'*) # braille = working
-                icons+='#[fg=yellow,bold]@ICON@#[default]'
-                ;;
-            *) # claude: blocked if a permission prompt is on screen
-                # ponytail: conversation output containing the same phrases near the bottom can false-positive — resolves itself once it scrolls
-                if tmux capture-pane -p -t "$id" 2>/dev/null | tail -20 | grep -qiE "$blocked_re"; then
-                    icons+='#[fg=red,bold]!#[default]'
-                else
-                    icons+='#[fg=green]●#[default]'
-                fi
-                ;;
-        esac
+        # claude: working = spinner title confirmed by the star status line on
+        # screen; a spinner title without it is stale (agent already stopped)
+        screen=$(tmux capture-pane -p -t "$id" 2>/dev/null | tail -20)
+        if is_spinner "$title" && grep -qE "$working_re" <<<"$screen"; then
+            icons+='#[fg=yellow,bold]@ICON@#[default]'
+        # blocked if a permission prompt is on screen
+        # ponytail: conversation output containing the same phrases near the bottom can false-positive — resolves itself once it scrolls
+        elif grep -qiE "$blocked_re" <<<"$screen"; then
+            icons+='#[fg=red,bold]!#[default]'
+        else
+            icons+='#[fg=green]●#[default]'
+        fi
     done < <(tmux list-panes -a -F $'#{pane_current_command}\t#{pane_current_path}\t#{pane_id}\t#{pane_title}' | sort -t$'\t' -k2,2)
     flush
 }
