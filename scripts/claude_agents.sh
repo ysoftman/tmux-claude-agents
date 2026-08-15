@@ -76,11 +76,14 @@ scan() {
             prev="$path"
             icons=""
         fi
+        # last 20 non-blank lines: the agents panel pads the bottom of the
+        # screen with blank lines, pushing the status area above a plain
+        # tail -20 window — working panes then read as idle
+        screen=$(tmux capture-pane -p -t "$id" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -20)
         if [ "$agent" = opencode ]; then
             # opencode puts only the session name in the title (OC | ...), so state
             # comes off the screen: a "Permission required" dialog while it needs
             # the user, "esc interrupt" in the footer while a turn is running
-            screen=$(tmux capture-pane -p -t "$id" 2>/dev/null | tail -20)
             case "$screen" in
                 *"Permission required"*) icons+='#[fg=red,bold]!#[default]' ;;
                 *"esc interrupt"*) icons+='#[fg=yellow,bold]@BICON@#[default]' ;;
@@ -90,7 +93,6 @@ scan() {
         fi
         # claude: working = spinner title confirmed by the star status line on
         # screen; a spinner title without it is stale (agent already stopped)
-        screen=$(tmux capture-pane -p -t "$id" 2>/dev/null | tail -20)
         if is_spinner "$title" && grep -qE "$working_re" <<<"$screen"; then
             icons+='#[fg=yellow,bold]@ICON@#[default]'
         # blocked if a permission prompt is on screen
