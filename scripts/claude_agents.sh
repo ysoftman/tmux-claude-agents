@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # ysoftman
-# Claude Code / OpenCode agents status-line daemon for tmux — started by claude-agents.tmux.
+# Claude Code / OpenCode agents tab-icon daemon for tmux — started by claude-agents.tmux.
 # Claude Code reports its state via the OSC title (spinner prefix = working),
 # which tmux captures in pane_title, so per-session state is read per pane.
 # OpenCode only puts the session name in the title, so its state is read from
 # the TUI footer line instead.
-# Sessions in the same directory are merged into one entry with stacked icons
-# (e.g. ✻● myenv).
-# Sets status-format[1] directly and shrinks status back to one line when no
-# agent is running, hiding the line entirely. Exits when tmux server dies
-# (set fails).
+# Agent panes in the same window stack their icons (e.g. ✻●) into that
+# window's @ca_icon option, shown at the end of its tab by the #{@ca_icon}
+# reference this daemon keeps appended to window-status-format.
+# Exits when tmux server dies (show/list fails).
 
 # match spinner chars by UTF-8 byte prefix, locale-independent.
 # claude code used braille ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ (U+2800-U+28FF) up to ~2.1.2xx, then switched to
@@ -28,18 +27,26 @@ blocked_re='do you want to|would you like to|waiting for permission|esc to cance
 # e.g. "✳ Processing… (1m 28s · ↓ 2.8k tokens)" — gone when idle
 working_re='^(·|✢|✳|✶|✻|✽) .*…'
 
-# append icons collected for the previous directory (prev) to cached as one entry
-flush() {
-    local name
-    [ -z "$prev" ] && return
-    name="${prev##*/}"
-    if [[ "$icons" == *fg=red* ]]; then
-        cached+="${icons} #[fg=red,bold]${name}#[default]   "
-    elif [[ "$icons" == *ICON@* ]]; then
-        cached+="${icons} #[fg=yellow,bold]${name}#[default]   "
-    else
-        cached+="${icons} #[fg=green]${name}#[default]   "
-    fi
+# keep #{@ca_icon} in the tab formats: a theme plugin loading after us, or
+# a config reload, can overwrite window-status-format — re-add.
+# also doubles as the tmux-server liveness check (exit when show fails).
+# inserted before the format's last #[...] style block, which in powerline
+# themes is the closing separator, so the icon sits next to the tab title
+# inside the themed segment; formats without styles get it appended.
+# a format whose last #[ lives inside a #{?,,} conditional would be mangled
+# — none of the common themes do that
+hook_format() {
+    local opt fmt head
+    for opt in window-status-format window-status-current-format; do
+        fmt=$(tmux show -gv "$opt") || exit 0
+        case "$fmt" in *'#{@ca_icon}'*) continue ;; esac
+        head="${fmt%"#["*}"
+        if [ "$head" = "$fmt" ]; then
+            tmux set -g "$opt" "$fmt#{@ca_icon}"
+        else
+            tmux set -g "$opt" "$head#{@ca_icon}${fmt#"$head"}"
+        fi
+    done
 }
 
 # true if the title starts with a spinner char (braille or ◐◓◑◒).
@@ -55,12 +62,22 @@ is_spinner() {
     return 1
 }
 
+# append icons collected for the previous window (prev) to cur as one line
+flush() {
+    [ -n "$prev" ] && cur+="$prev"$'\t'"$icons"$'\n'
+}
+
 scan() {
-    local cmd path id title agent screen
-    cached=""
+    local cmd wid id title agent screen panes prev icons
+    panes=$(tmux list-panes -a -F $'#{pane_current_command}\t#{window_id}\t#{pane_id}\t#{pane_title}') || exit 0
+    # lines of "<window_id>\t<icons>"; leading newline so the
+    # $'\n'<wid>$'\t' membership checks in apply can't match mid-line
+    cur=$'\n'
     prev=""
     icons=""
-    while IFS=$'\t' read -r cmd path id title; do
+    # panes of the same window are already adjacent in list-panes output,
+    # so consecutive grouping needs no sort
+    while IFS=$'\t' read -r cmd wid id title; do
         # identify agent panes by process/command name so stale pane titles after
         # exit don't become ghost entries:
         # - claude sets its process title to a version string (e.g. 2.1.204)
@@ -71,9 +88,9 @@ scan() {
             opencode | opencode.exe) agent=opencode ;; # opencode
             *) continue ;;
         esac
-        if [ "$path" != "$prev" ]; then
+        if [ "$wid" != "$prev" ]; then
             flush
-            prev="$path"
+            prev="$wid"
             icons=""
         fi
         # last 20 non-blank lines: the agents panel pads the bottom of the
@@ -102,44 +119,50 @@ scan() {
         else
             icons+='#[fg=green]●#[default]'
         fi
-    done < <(tmux list-panes -a -F $'#{pane_current_command}\t#{pane_current_path}\t#{pane_id}\t#{pane_title}' | sort -t$'\t' -k2,2)
+    done <<<"$panes"
     flush
 }
 
-# set only when the line content changes (exit if tmux server is gone)
-show_line() {
-    [ "$1" = "$last_line" ] && return
-    last_line="$1"
-    tmux set -g 'status-format[1]' "#[align=left] $1" || exit 0
+# resolve spinner frame $1 into each window's icons and push only changed
+# values to @ca_icon; unset it on windows whose agents are gone.
+# errors on set are ignored — the window may have closed since the scan
+apply() {
+    local wid val out=$'\n'
+    while IFS=$'\t' read -r wid val; do
+        [ -z "$wid" ] && continue
+        val="${val//@ICON@/${frames[$1]}}"
+        val="${val//@BICON@/${bframes[$1]}}"
+        out+="$wid"$'\t'"$val"$'\n'
+        case "$shown" in *$'\n'"$wid"$'\t'"$val"$'\n'*) continue ;; esac
+        tmux set -w -t "$wid" @ca_icon " $val" 2>/dev/null
+    done <<<"$cur"
+    while IFS=$'\t' read -r wid val; do
+        [ -z "$wid" ] && continue
+        case "$out" in *$'\n'"$wid"$'\t'*) continue ;; esac
+        tmux set -w -t "$wid" -u @ca_icon 2>/dev/null
+    done <<<"$shown"
+    shown="$out"
 }
 
-last_line=""
-visible=""
+shown=$'\n'
 tick=0
 while :; do
     # scan about every 3 seconds, refresh the frame every iteration
-    ((tick % 3 == 0)) && scan
+    if ((tick % 3 == 0)); then
+        hook_format
+        scan
+    fi
     tick=$((tick + 1))
-    if [ -z "$cached" ]; then
-        if [ "$visible" != off ]; then
-            tmux set -g status on || exit 0 # no agents — hide the line
-            visible=off
-        fi
-        sleep 1
-        continue
-    fi
-    if [ "$visible" != on ]; then
-        tmux set -g status 2 || exit 0
-        visible=on
-    fi
-    if [[ "$cached" == *ICON@* ]]; then
-        for i in "${!frames[@]}"; do
-            line="${cached//@ICON@/${frames[i]}}"
-            show_line "${line//@BICON@/${bframes[i]}}"
-            sleep 0.2
-        done
-    else
-        show_line "$cached"
-        sleep 1
-    fi
+    case "$cur" in
+        *ICON@*)
+            for i in "${!frames[@]}"; do
+                apply "$i"
+                sleep 0.2
+            done
+            ;;
+        *)
+            apply 0
+            sleep 1
+            ;;
+    esac
 done
