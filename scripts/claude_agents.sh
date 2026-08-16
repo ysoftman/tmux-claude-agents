@@ -8,7 +8,8 @@
 # Agent panes in the same window stack their icons (e.g. ✻●) into that
 # window's @ca_icon option, shown at the end of its tab by the #{@ca_icon}
 # reference this daemon keeps appended to window-status-format.
-# Exits when tmux server dies (show/list fails).
+# Exits when the tmux server dies or a newer daemon takes over (see stale),
+# logging why to $TMPDIR/tmux-claude-agents.log.
 
 # match spinner chars by UTF-8 byte prefix, locale-independent.
 # claude code used braille ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ (U+2800-U+28FF) up to ~2.1.2xx, then switched to
@@ -28,14 +29,24 @@ blocked_re='do you want to|would you like to|waiting for permission|esc to cance
 working_re='^(·|✢|✳|✶|✻|✽) .*…'
 
 # exit when a newer daemon has claimed @claude_agents_pid (plugin reloaded),
-# so only the newest one drives the icons without anyone sending signals
+# so only the newest one drives the icons without anyone sending signals.
+# also covers a dead tmux server: show fails, the empty value never matches $$
 stale() {
     [ "$(tmux show -gqv @claude_agents_pid)" != "$$" ]
 }
 
+# icons stopping is silent, so leave a line behind saying when, why and after
+# how long this daemon went away. a signal kill would skip the EXIT trap, so
+# the usual suspects are trapped too — that's what tells an outside kill
+# apart from the daemon deciding to stop
+why=unknown
+trap 'date "+%F %T pid $$ after ${SECONDS}s exit: $why" >>"${TMPDIR:-/tmp}/tmux-claude-agents.log"' EXIT
+trap 'why=killed-by-signal; exit 0' TERM HUP INT PIPE
+
 # keep #{@ca_icon} in the tab formats: a theme plugin loading after us, or
 # a config reload, can overwrite window-status-format — re-add.
-# also doubles as the tmux-server liveness check (exit when show fails).
+# a failing tmux call here is skipped, not fatal: only stale() decides to
+# exit, so a transient failure can't silently stop the icons.
 # inserted before the format's last #[...] style block, which in powerline
 # themes is the closing separator, so the icon sits next to the tab title
 # inside the themed segment; formats without styles get it appended.
@@ -44,7 +55,7 @@ stale() {
 hook_format() {
     local opt fmt head
     for opt in window-status-format window-status-current-format; do
-        fmt=$(tmux show -gv "$opt") || exit 0
+        fmt=$(tmux show -gv "$opt") || return
         case "$fmt" in *'#{@ca_icon}'*) continue ;; esac
         head="${fmt%"#["*}"
         if [ "$head" = "$fmt" ]; then
@@ -75,7 +86,7 @@ flush() {
 
 scan() {
     local cmd wid id title agent screen panes prev icons
-    panes=$(tmux list-panes -a -F $'#{pane_current_command}\t#{window_id}\t#{pane_id}\t#{pane_title}') || exit 0
+    panes=$(tmux list-panes -a -F $'#{pane_current_command}\t#{window_id}\t#{pane_id}\t#{pane_title}') || return
     # lines of "<window_id>\t<icons>"; leading newline so the
     # $'\n'<wid>$'\t' membership checks in apply can't match mid-line
     cur=$'\n'
@@ -152,11 +163,17 @@ apply() {
 
 shown=$'\n'
 tick=0
-tmux set -g @claude_agents_pid "$$" || exit 0
+tmux set -g @claude_agents_pid "$$" || {
+    why=no-server-at-start
+    exit 0
+}
 while :; do
     # scan about every 3 seconds, refresh the frame every iteration
     if ((tick % 3 == 0)); then
-        stale && exit 0
+        stale && {
+            why='replaced or tmux server gone'
+            exit 0
+        }
         hook_format
         scan
     fi
