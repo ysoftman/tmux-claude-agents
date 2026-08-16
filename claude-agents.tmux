@@ -7,14 +7,15 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# kill the previous daemon on reload
-old_pid="$(tmux show-option -gqv @claude_agents_pid)"
-[ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null
-
 # clear the second status line a pre-tab-icon daemon may have left behind
 # (it set "status 2" and status-format[1] and nothing else resets them)
 tmux set -gu status 2>/dev/null
 tmux set -gu 'status-format[1]' 2>/dev/null
 
-"$CURRENT_DIR/scripts/claude_agents.sh" >/dev/null 2>&1 &
-tmux set -g @claude_agents_pid "$!"
+# start under the tmux server, not as a child of whatever shell ran this entry:
+# a daemon backgrounded from a terminal or an agent session dies with it, and
+# the icons silently stop until the next reload.
+# no kill of the old daemon here — the new one claims @claude_agents_pid and the
+# old one sees the change and exits itself (a stored pid may be reused by an
+# unrelated process by the time we would kill it)
+tmux run-shell -b "'$CURRENT_DIR/scripts/claude_agents.sh' >/dev/null 2>&1"

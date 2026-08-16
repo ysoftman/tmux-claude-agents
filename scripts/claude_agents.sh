@@ -27,6 +27,12 @@ blocked_re='do you want to|would you like to|waiting for permission|esc to cance
 # e.g. "✳ Processing… (1m 28s · ↓ 2.8k tokens)" — gone when idle
 working_re='^(·|✢|✳|✶|✻|✽) .*…'
 
+# exit when a newer daemon has claimed @claude_agents_pid (plugin reloaded),
+# so only the newest one drives the icons without anyone sending signals
+stale() {
+    [ "$(tmux show -gqv @claude_agents_pid)" != "$$" ]
+}
+
 # keep #{@ca_icon} in the tab formats: a theme plugin loading after us, or
 # a config reload, can overwrite window-status-format — re-add.
 # also doubles as the tmux-server liveness check (exit when show fails).
@@ -146,9 +152,11 @@ apply() {
 
 shown=$'\n'
 tick=0
+tmux set -g @claude_agents_pid "$$" || exit 0
 while :; do
     # scan about every 3 seconds, refresh the frame every iteration
     if ((tick % 3 == 0)); then
+        stale && exit 0
         hook_format
         scan
     fi
