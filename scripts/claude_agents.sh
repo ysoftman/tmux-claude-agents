@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
 # ysoftman
 # Claude Code / OpenCode agents tab-icon daemon for tmux — started by claude-agents.tmux.
-# Claude Code reports its state via the OSC title (spinner prefix = working),
-# which tmux captures in pane_title, so per-session state is read per pane.
-# OpenCode only puts the session name in the title, so its state is read from
-# the TUI footer line instead.
+# Claude Code draws a star status line ("✳ Working…") at the bottom of its TUI
+# only while a turn is running, so per-session state is read off each pane's
+# screen. The OSC title can't be used: ≤2.1.228 it froze the last spinner
+# frame after stopping, and ≥2.1.237 it carries no spinner at all.
+# OpenCode's state likewise comes from its TUI footer line.
 # Agent panes in the same window stack their icons (e.g. ✻●) into that
 # window's @ca_icon option, shown at the end of its tab by the #{@ca_icon}
 # reference this daemon keeps appended to window-status-format.
 # Exits when the tmux server dies or a newer daemon takes over (see stale),
 # logging why to $TMPDIR/tmux-claude-agents.log.
 
-# match spinner chars by UTF-8 byte prefix, locale-independent.
-# claude code used braille ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ (U+2800-U+28FF) up to ~2.1.2xx, then switched to
-# circle quadrants ◐◓◑◒ (U+25D0-U+25D3) as of 2.1.228 — match both.
-# the pulsing star ·✢✳✶✻✽ seen while working lives only in the TUI screen,
-# not the title; idle teammate panes carry a static ✳ title prefix, so a
-# star in the title must NOT be treated as working
+# match multibyte chars as raw byte sequences, locale-independent
 export LC_ALL=C
 
 # claude: same star sequence Claude Code animates with, ping-ponging back down
@@ -66,27 +62,14 @@ hook_format() {
     done
 }
 
-# true if the title starts with a spinner char (braille or ◐◓◑◒).
-# a spinner prefix alone doesn't prove working: claude leaves the last frame
-# frozen in the title after it stops (seen on 2.1.228, e.g. after finishing
-# while in the agents view). the title also freezes while a tool runs, so
-# title animation can't be used either — the screen (working_re) decides
-is_spinner() {
-    case "$1" in
-        $'\xe2\xa0'* | $'\xe2\xa1'* | $'\xe2\xa2'* | $'\xe2\xa3'* | \
-            $'\xe2\x97\x90'* | $'\xe2\x97\x91'* | $'\xe2\x97\x92'* | $'\xe2\x97\x93'*) return 0 ;;
-    esac
-    return 1
-}
-
 # append icons collected for the previous window (prev) to cur as one line
 flush() {
     [ -n "$prev" ] && cur+="$prev"$'\t'"$icons"$'\n'
 }
 
 scan() {
-    local cmd wid id title agent screen panes prev icons
-    panes=$(tmux list-panes -a -F $'#{pane_current_command}\t#{window_id}\t#{pane_id}\t#{pane_title}') || return
+    local cmd wid id agent screen panes prev icons
+    panes=$(tmux list-panes -a -F $'#{pane_current_command}\t#{window_id}\t#{pane_id}') || return
     # lines of "<window_id>\t<icons>"; leading newline so the
     # $'\n'<wid>$'\t' membership checks in apply can't match mid-line
     cur=$'\n'
@@ -94,7 +77,7 @@ scan() {
     icons=""
     # panes of the same window are already adjacent in list-panes output,
     # so consecutive grouping needs no sort
-    while IFS=$'\t' read -r cmd wid id title; do
+    while IFS=$'\t' read -r cmd wid id; do
         # identify agent panes by process/command name so stale pane titles after
         # exit don't become ghost entries:
         # - claude sets its process title to a version string (e.g. 2.1.204)
@@ -125,9 +108,8 @@ scan() {
             esac
             continue
         fi
-        # claude: working = spinner title confirmed by the star status line on
-        # screen; a spinner title without it is stale (agent already stopped)
-        if is_spinner "$title" && grep -qE "$working_re" <<<"$screen"; then
+        # claude: working = star status line on screen (see working_re)
+        if grep -qE "$working_re" <<<"$screen"; then
             icons+='#[fg=yellow,bold]@ICON@#[default]'
         # blocked if a permission prompt is on screen
         # ponytail: conversation output containing the same phrases near the bottom can false-positive — resolves itself once it scrolls
